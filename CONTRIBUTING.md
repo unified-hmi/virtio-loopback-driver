@@ -1,4 +1,4 @@
-# Contributing to Remote Virtio GPU Device (RVGPU)
+# Contributing to Virtio Loopback Device
 
 Thank you for your coming the Unified HMI project whose repository hosted by
 Panasonic Automotive Systems Co. Ltd (“PAS”). We'd love to accept your various
@@ -52,7 +52,7 @@ By making a contribution to this project, I certify that:
 
 ```
 
-# Remote VirtIO GPU Device Coding Style
+# Virtio Loopback Device Coding Style
 
 [Linux kernel coding style](https://www.kernel.org/doc/html/v5.18/process/coding-style.html) is used for RVGPU development. The basic idea is following:
 
