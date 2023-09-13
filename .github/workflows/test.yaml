@@ -1,0 +1,93 @@
+name: test
+run-name: Build virtio-lo kernel driver
+on: [push]
+
+jobs:
+
+  build:
+    name: Build on ubuntu-20.04
+    runs-on: ubuntu-20.04
+    permissions:
+      contents: write
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Compose environment variables
+        run: |
+
+          PACKAGE_NAME=virtio-lo
+
+          if [[ ${{ github.ref }} == refs/tags/v* ]] ; then
+                TAG=${{ github.ref_name }}
+                PACKAGE_VERSION="${TAG:1}"
+                RELEASE=true
+          else
+                SHORT_SHA=$(git rev-parse --short HEAD)
+                PACKAGE_VERSION="0.${SHORT_SHA}"
+                RELEASE=false
+          fi
+
+          echo "PACKAGE_NAME=${PACKAGE_NAME}"       >> $GITHUB_ENV
+          echo "PACKAGE_VERSION=${PACKAGE_VERSION}" >> $GITHUB_ENV
+          echo "RELEASE=${RELEASE}"                 >> $GITHUB_ENV
+
+      - name: Build in the source tree
+        run: make -C "/lib/modules/$(uname -r)/build" M="$(pwd)" modules
+
+      - name: Install dependencies
+        run: sudo apt update && sudo apt install -y dkms debhelper
+
+      - name: Create debian package
+        run: |
+
+          cat << EOF > "dkms.conf"
+          PACKAGE_NAME=${PACKAGE_NAME}
+          PACKAGE_VERSION=${PACKAGE_VERSION}
+          DEST_MODULE_LOCATION[0]="/updates"
+          EOF
+
+          sudo mkdir -p "/usr/src/${PACKAGE_NAME}-${PACKAGE_VERSION}"
+          sudo cp -r *.[hc] Kbuild dkms.conf "/usr/src/${PACKAGE_NAME}-${PACKAGE_VERSION}"
+
+          sudo dkms add   -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}" || exit 1
+          sudo dkms build -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}" || exit 1
+          sudo dkms mkdeb -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}" || exit 1
+
+          cp /var/lib/dkms/"${PACKAGE_NAME}"/"${PACKAGE_VERSION}"/deb/* .
+
+      - name: Create development package
+        run: |
+
+          INSTALL="$(pwd)/install"
+          mkdir -p "${INSTALL}/DEBIAN"
+
+          cat <<EOF > "${INSTALL}/DEBIAN/control"
+          Package: ${PACKAGE_NAME}
+          Version: ${PACKAGE_VERSION}
+          Section: base
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Aleksei Makarov <alm@opensynergy.com>
+          Description: Development package for virtio-lo kernel driver
+          EOF
+
+          mkdir -p "${INSTALL}/usr/include/linux"
+          cp virtio_lo.h "${INSTALL}/usr/include/linux"
+          dpkg-deb --build "${INSTALL}" "${PACKAGE_NAME}-dev_${PACKAGE_VERSION}.deb"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          retention-days: 1
+          name: debian-packages
+          path: "*.deb"
+
+      - name: Create release
+        if: env.RELEASE == 'true'
+        uses: ncipollo/release-action@v1
+        with:
+          makeLatest: true
+          tag: v${{ env.PACKAGE_VERSION }}
+          artifacts: "*.deb"
