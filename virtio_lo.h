@@ -25,7 +25,6 @@ struct virtio_lo_devinfo {
 	__u64 features; /* IN/OUT */
 	__u32 config_size; /* IN */
 	__s32 config_kick; /* IN */
-	__s32 card_index; /* IN */
 	__u32 padding; /* IN */
 	__u8 *config; /* IN/OUT */
 	struct virtio_lo_qinfo *qinfo; /* IN/OUT */
