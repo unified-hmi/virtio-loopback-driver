@@ -171,7 +171,6 @@ static long vilo_ioctl_adddev(struct virtio_lo_owner *owner,
 
 	dev->device_id = di.device_id;
 	dev->vendor_id = di.vendor_id;
-	dev->card_index = di.card_index;
 	dev->nqueues = di.nqueues;
 	dev->features = dev->device_features = di.features;
 

@@ -284,9 +284,6 @@ static int virtio_lo_probe(struct platform_device *pdev)
 	vl_driv->device = device;
 	vl_driv->pdev = pdev;
 
-#ifdef CONFIG_VIRTIO_LO_DEVICE_INDEX
-	vl_driv->vdev.card_index = device->card_index;
-#endif /* CONFIG_VIRTIO_LO_DEVICE_INDEX */
 	vl_driv->vdev.dev.parent = &pdev->dev;
 	vl_driv->vdev.dev.release = virtio_lo_release_dev_empty;
 	vl_driv->vdev.config = &virtio_lo_config_ops;

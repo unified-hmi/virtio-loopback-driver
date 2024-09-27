@@ -25,7 +25,6 @@ struct virtio_lo_device {
 	unsigned idx;
 	u32 device_id;
 	u32 vendor_id;
-	int card_index;
 
 	struct platform_device *pdev;
 
