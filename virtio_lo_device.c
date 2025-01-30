@@ -13,6 +13,7 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
+#include <linux/dma-mapping.h>
 
 #include <uapi/linux/virtio_config.h>
 
@@ -144,6 +145,12 @@ static void virtio_lo_add_pdev(struct work_struct *work)
 	unsigned id = atomic_fetch_add(1, &vilo_device_id);
 	dev->pdev = platform_device_register_data(
 		&vl_device_parent, "virtio-lo", id, &dev, sizeof(dev));
+
+	if (dma_set_mask(&dev->pdev->dev, DMA_BIT_MASK(64))) {
+		dev_notice(&dev->pdev->dev, "Failed to set DMA mask to 64-bits, DMA mask: 0x%llx\n", *dev->pdev->dev.dma_mask);
+	} else {
+		dev_notice(&dev->pdev->dev, "Success to set DMA mask to 64-bits, DMA mask: 0x%llx\n", *dev->pdev->dev.dma_mask);
+	}
 	complete_all(&dev->init_done);
 }
 
