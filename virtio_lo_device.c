@@ -3,6 +3,7 @@
  * Copyright (c) 2022  Panasonic Automotive Systems, Co., Ltd.
  */
 
+#include <linux/version.h>
 #include <linux/atomic.h>
 #include <linux/eventfd.h>
 #include <linux/fs.h>
@@ -375,13 +376,21 @@ void virtio_lo_kick_device(struct virtio_lo_device *dev, int qidx)
 {
 	if (qidx >= 0 && qidx < dev->nqueues) {
 		if (dev->queues[qidx].device_kick) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+			eventfd_signal(dev->queues[qidx].device_kick);
+#else
 			eventfd_signal(dev->queues[qidx].device_kick, 1);
+#endif
 		}
 	} else {
 		unsigned i;
 		for (i = 0; i < dev->nqueues; i++) {
 			if (dev->queues[i].device_kick) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+				eventfd_signal(dev->queues[i].device_kick);
+#else
 				eventfd_signal(dev->queues[i].device_kick, 1);
+#endif
 			}
 		}
 	}
@@ -406,7 +415,11 @@ void virtio_lo_set_queue(struct virtio_lo_device *dev, unsigned qidx, u32 size,
 void virtio_lo_config_device(struct virtio_lo_device *dev)
 {
 	if (dev->config_kick) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+		eventfd_signal(dev->config_kick);
+#else
 		eventfd_signal(dev->config_kick, 1);
+#endif
 	}
 }
 
