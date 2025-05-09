@@ -12,7 +12,7 @@
 #include <linux/virtio.h>
 #include <linux/virtio_config.h>
 #include <linux/virtio_ring.h>
-
+#include <linux/version.h>
 #include "virtio_lo_device.h"
 
 /* The alignment to use between consumer and producer parts of vring.
@@ -215,18 +215,18 @@ static struct virtqueue *vl_setup_vq(struct virtio_device *vdev, unsigned index,
 	return vq;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 static int vl_find_vqs(struct virtio_device *vdev, unsigned nvqs,
-		       struct virtqueue *vqs[], vq_callback_t *callbacks[],
-		       const char *const names[], const bool *ctx,
-		       struct irq_affinity *desc)
+		struct virtqueue *vqs[], struct virtqueue_info vqs_info[], struct irq_affinity *desc)
 {
 	struct virtio_lo_driver *vl_driver = to_virtio_lo_driver(vdev);
 	unsigned i;
-
-	for (i = 0; i < nvqs; ++i) {
-		vqs[i] = vl_setup_vq(vdev, i, callbacks[i], names[i],
-				     ctx ? ctx[i] : false);
-		if (IS_ERR(vqs[i])) {
+	for (i = 0; i < nvqs; ++i)
+	{
+		vqs[i] = vl_setup_vq(vdev, i, vqs_info[i].callback, vqs_info[i].name,
+							 vqs_info[i].ctx ? vqs_info[i].ctx : false);
+		if (IS_ERR(vqs[i]))
+		{
 			vl_del_vqs(vdev);
 			return PTR_ERR(vqs[i]);
 		}
@@ -235,6 +235,30 @@ static int vl_find_vqs(struct virtio_device *vdev, unsigned nvqs,
 
 	return 0;
 }
+#else
+static int vl_find_vqs(struct virtio_device *vdev, unsigned nvqs,
+					   struct virtqueue *vqs[], vq_callback_t *callbacks[],
+					   const char *const names[], const bool *ctx,
+					   struct irq_affinity *desc)
+{
+	struct virtio_lo_driver *vl_driver = to_virtio_lo_driver(vdev);
+	unsigned i;
+
+	for (i = 0; i < nvqs; ++i)
+	{
+		vqs[i] = vl_setup_vq(vdev, i, callbacks[i], names[i],
+				ctx ? ctx[i] : false);
+		if (IS_ERR(vqs[i]))
+		{
+			vl_del_vqs(vdev);
+			return PTR_ERR(vqs[i]);
+		}
+		vl_driver->queues[i] = vqs[i];
+	}
+
+	return 0;
+}
+#endif
 
 static const char *vl_bus_name(struct virtio_device *vdev)
 {
@@ -304,6 +328,14 @@ static int virtio_lo_probe(struct platform_device *pdev)
 	return register_virtio_device(&vl_driv->vdev);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+static void virtio_lo_remove(struct platform_device *pdev)
+{
+	struct virtio_lo_driver *vl_driv = platform_get_drvdata(pdev);
+
+	unregister_virtio_device(&vl_driv->vdev);
+}
+#else
 static int virtio_lo_remove(struct platform_device *pdev)
 {
 	struct virtio_lo_driver *vl_driv = platform_get_drvdata(pdev);
@@ -311,6 +343,7 @@ static int virtio_lo_remove(struct platform_device *pdev)
 	unregister_virtio_device(&vl_driv->vdev);
 	return 0;
 }
+#endif
 
 /* Platform driver */
 static struct of_device_id virtio_lo_match[] = {
