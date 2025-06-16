@@ -19,6 +19,7 @@
 #include <uapi/linux/virtio_config.h>
 
 #include "virtio_lo_device.h"
+#include "virtio_lo_driver.h"
 #include "virtio_lo.h"
 
 static void virtio_lo_add_pdev(struct work_struct *work);
@@ -144,14 +145,19 @@ static void virtio_lo_add_pdev(struct work_struct *work)
 	struct virtio_lo_device *dev =
 		container_of(work, struct virtio_lo_device, init_work);
 	unsigned id = atomic_fetch_add(1, &vilo_device_id);
-	dev->pdev = platform_device_register_data(
-		&vl_device_parent, "virtio-lo", id, &dev, sizeof(dev));
+	char dev_name[32];
+	snprintf(dev_name, sizeof(dev_name), "virtio-lo-%04x%04x", dev->device_id, dev->vendor_id);
+	if (!is_name_in_virtio_lo_table(dev_name))
+		dev_warn(&vl_device_parent, "Device name '%s' is not supported. Please ensure it is added to virtio_lo_id_table", dev_name);
+
+	dev->pdev = platform_device_register_data(&vl_device_parent, dev_name, id, &dev, sizeof(dev));
 
 	if (dma_set_mask(&dev->pdev->dev, DMA_BIT_MASK(64))) {
 		dev_notice(&dev->pdev->dev, "Failed to set DMA mask to 64-bits, DMA mask: 0x%llx\n", *dev->pdev->dev.dma_mask);
 	} else {
 		dev_notice(&dev->pdev->dev, "Success to set DMA mask to 64-bits, DMA mask: 0x%llx\n", *dev->pdev->dev.dma_mask);
 	}
+
 	complete_all(&dev->init_done);
 }
 
@@ -230,7 +236,7 @@ static long vilo_ioctl_adddev(struct virtio_lo_owner *owner,
 	wait_for_completion(&dev->init_done);
 
 	if (!(dev->status & VIRTIO_CONFIG_S_DRIVER_OK)) {
-		dev_notice(&vl_device_parent,
+		dev_err(&vl_device_parent,
 			   "virtio lo device initialization failed\n");
 		ret = -ENOENT;
 		goto err_queues;

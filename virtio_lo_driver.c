@@ -354,6 +354,92 @@ static struct of_device_id virtio_lo_match[] = {
 };
 MODULE_DEVICE_TABLE(of, virtio_lo_match);
 
+/**
+ * virtio_lo_id_table defines 64 device names using device_id VIRTIO_ID_GPU
+ * and vendor_id PCI_VENDOR_ID_REDHAT_QUMRANET, incremented for uniqueness,
+ * as specified by rvgpu-proxy. Add new names here as needed for driver binding.
+ */
+static struct platform_device_id virtio_lo_id_table[] = {
+	{ "virtio-lo-00101af4", 0 },
+	{ "virtio-lo-00101af5", 0 },
+	{ "virtio-lo-00101af6", 0 },
+	{ "virtio-lo-00101af7", 0 },
+	{ "virtio-lo-00101af8", 0 },
+	{ "virtio-lo-00101af9", 0 },
+	{ "virtio-lo-00101afa", 0 },
+	{ "virtio-lo-00101afb", 0 },
+	{ "virtio-lo-00101afc", 0 },
+	{ "virtio-lo-00101afd", 0 },
+	{ "virtio-lo-00101afe", 0 },
+	{ "virtio-lo-00101aff", 0 },
+	{ "virtio-lo-00101b00", 0 },
+	{ "virtio-lo-00101b01", 0 },
+	{ "virtio-lo-00101b02", 0 },
+	{ "virtio-lo-00101b03", 0 },
+	{ "virtio-lo-00101b04", 0 },
+	{ "virtio-lo-00101b05", 0 },
+	{ "virtio-lo-00101b06", 0 },
+	{ "virtio-lo-00101b07", 0 },
+	{ "virtio-lo-00101b08", 0 },
+	{ "virtio-lo-00101b09", 0 },
+	{ "virtio-lo-00101b0a", 0 },
+	{ "virtio-lo-00101b0b", 0 },
+	{ "virtio-lo-00101b0c", 0 },
+	{ "virtio-lo-00101b0d", 0 },
+	{ "virtio-lo-00101b0e", 0 },
+	{ "virtio-lo-00101b0f", 0 },
+	{ "virtio-lo-00101b10", 0 },
+	{ "virtio-lo-00101b11", 0 },
+	{ "virtio-lo-00101b12", 0 },
+	{ "virtio-lo-00101b13", 0 },
+	{ "virtio-lo-00101b14", 0 },
+	{ "virtio-lo-00101b15", 0 },
+	{ "virtio-lo-00101b16", 0 },
+	{ "virtio-lo-00101b17", 0 },
+	{ "virtio-lo-00101b18", 0 },
+	{ "virtio-lo-00101b19", 0 },
+	{ "virtio-lo-00101b1a", 0 },
+	{ "virtio-lo-00101b1b", 0 },
+	{ "virtio-lo-00101b1c", 0 },
+	{ "virtio-lo-00101b1d", 0 },
+	{ "virtio-lo-00101b1e", 0 },
+	{ "virtio-lo-00101b1f", 0 },
+	{ "virtio-lo-00101b20", 0 },
+	{ "virtio-lo-00101b21", 0 },
+	{ "virtio-lo-00101b22", 0 },
+	{ "virtio-lo-00101b23", 0 },
+	{ "virtio-lo-00101b24", 0 },
+	{ "virtio-lo-00101b25", 0 },
+	{ "virtio-lo-00101b26", 0 },
+	{ "virtio-lo-00101b27", 0 },
+	{ "virtio-lo-00101b28", 0 },
+	{ "virtio-lo-00101b29", 0 },
+	{ "virtio-lo-00101b2a", 0 },
+	{ "virtio-lo-00101b2b", 0 },
+	{ "virtio-lo-00101b2c", 0 },
+	{ "virtio-lo-00101b2d", 0 },
+	{ "virtio-lo-00101b2e", 0 },
+	{ "virtio-lo-00101b2f", 0 },
+	{ "virtio-lo-00101b30", 0 },
+	{ "virtio-lo-00101b31", 0 },
+	{ "virtio-lo-00101b32", 0 },
+	{ "virtio-lo-00101b33", 0 },
+	{},
+};
+MODULE_DEVICE_TABLE(platform, virtio_lo_id_table);
+
+bool is_name_in_virtio_lo_table(const char *name)
+{
+	const struct platform_device_id *id;
+
+	for (id = virtio_lo_id_table; id->name[0] != '\0'; id++) {
+		if (strcmp(id->name, name) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static struct platform_driver virtio_lo_driver_ops = {
 	.probe = virtio_lo_probe,
 	.remove = virtio_lo_remove,
@@ -362,6 +448,7 @@ static struct platform_driver virtio_lo_driver_ops = {
 			.name = "virtio-lo",
 			.of_match_table = virtio_lo_match,
 		},
+	.id_table = virtio_lo_id_table,
 };
 
 static int __init virtio_lo_init(void)
