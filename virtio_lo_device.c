@@ -24,7 +24,7 @@
 
 static void virtio_lo_add_pdev(struct work_struct *work);
 
-void vl_device_parent_release(struct device *dev)
+static void vl_device_parent_release(struct device *dev)
 {
 }
 

@@ -14,6 +14,7 @@
 #include <linux/virtio_ring.h>
 #include <linux/version.h>
 #include "virtio_lo_device.h"
+#include "virtio_lo_driver.h"
 
 /* The alignment to use between consumer and producer parts of vring.
  * Currently hardcoded to the page size. */
