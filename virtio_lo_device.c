@@ -287,12 +287,20 @@ static long vilo_ioctl_deldev(struct virtio_lo_owner *owner, unsigned idx)
 	spin_lock_irqsave(&owner->lock, flags);
 
 	dev = virtio_owner_getdev_unlocked(owner, idx);
-	if (dev) {
+	if (dev)
 		list_del(&dev->devlist);
+	spin_unlock_irqrestore(&owner->lock, flags);
+
+	/*
+	 * Release outside the spinlock: virtio_lo_device_release() calls
+	 * platform_device_unregister() (-> virtio_gpu_remove -> drm_dev_unplug
+	 * -> synchronize_srcu()), which can sleep and must not run in atomic
+	 * context. The release path below does the same for this reason.
+	 */
+	if (dev) {
 		virtio_lo_device_release(dev);
 		ret = 0;
 	}
-	spin_unlock_irqrestore(&owner->lock, flags);
 	return ret;
 }
 
