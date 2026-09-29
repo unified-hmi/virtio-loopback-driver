@@ -49,8 +49,9 @@ struct virtio_lo_kick {
 /* ioctl for creating virtio device */
 #define VIRTIO_LO_ADDDEV _IOWR(VIRTIO_LOIO, 1, struct virtio_lo_devinfo)
 #define VIRTIO_LO_DELDEV _IOW(VIRTIO_LOIO, 2, unsigned)
-/* DELDEV that keeps VIRTIO_LO_KICK available until unregister completes */
-#define VIRTIO_LO_DELDEV_DRAIN _IOW(VIRTIO_LOIO, 3, unsigned)
+/* Begin/finish a DELDEV while keeping VIRTIO_LO_KICK available to drain. */
+#define VIRTIO_LO_BEGIN_DELDEV_DRAIN _IOW(VIRTIO_LOIO, 3, unsigned)
+#define VIRTIO_LO_FINISH_DELDEV_DRAIN _IOW(VIRTIO_LOIO, 4, unsigned)
 
 /* ioctls for configuration */
 /* get config for device */

@@ -41,6 +41,7 @@ static struct workqueue_struct *vilo_wq;
 struct virtio_lo_owner {
 	atomic_t lastidx;
 	spinlock_t lock;
+	struct mutex lifecycle_lock;
 	struct list_head devlist;
 	struct list_head draining_devlist;
 };
@@ -56,16 +57,21 @@ virtio_owner_getdev_unlocked(struct virtio_lo_owner *owner, unsigned idx)
 			break;
 		}
 	}
-	if (ret)
-		return ret;
+	return ret;
+}
+
+/* should be called with owner->lock held */
+static struct virtio_lo_device *
+virtio_owner_getdraining_unlocked(struct virtio_lo_owner *owner, unsigned idx)
+{
+	struct virtio_lo_device *dev;
 
 	list_for_each_entry (dev, &owner->draining_devlist, devlist) {
 		if (dev->idx == idx) {
-			ret = dev;
-			break;
+			return dev;
 		}
 	}
-	return ret;
+	return NULL;
 }
 static inline struct virtio_lo_device *
 virtio_owner_getdev(struct virtio_lo_owner *owner, unsigned idx)
@@ -85,6 +91,7 @@ static int virtio_lo_misc_device_open(struct inode *inode, struct file *file)
 
 	owner = kmalloc(sizeof(*owner), GFP_KERNEL);
 	spin_lock_init(&owner->lock);
+	mutex_init(&owner->lifecycle_lock);
 	INIT_LIST_HEAD(&owner->devlist);
 	INIT_LIST_HEAD(&owner->draining_devlist);
 	file->private_data = owner;
@@ -293,43 +300,69 @@ err_dev:
 	return ret;
 }
 
-static long vilo_ioctl_deldev(struct virtio_lo_owner *owner, unsigned idx)
+static long vilo_ioctl_begin_deldev_drain(struct virtio_lo_owner *owner,
+					  unsigned idx)
 {
 	unsigned long flags;
 	long ret = -ENOENT;
 	struct virtio_lo_device *dev = NULL;
 	struct virtio_lo_device *candidate;
 
+	mutex_lock(&owner->lifecycle_lock);
 	spin_lock_irqsave(&owner->lock, flags);
 	list_for_each_entry (candidate, &owner->devlist, devlist) {
 		if (candidate->idx == idx) {
 			dev = candidate;
 			list_move_tail(&candidate->devlist,
 				       &owner->draining_devlist);
+			ret = 0;
 			break;
 		}
 	}
 	spin_unlock_irqrestore(&owner->lock, flags);
+	mutex_unlock(&owner->lifecycle_lock);
+
+	return ret;
+}
+
+static long vilo_ioctl_finish_deldev_drain(struct virtio_lo_owner *owner,
+					   unsigned idx)
+{
+	unsigned long flags;
+	long ret = -ENOENT;
+	struct virtio_lo_device *dev;
+
+	mutex_lock(&owner->lifecycle_lock);
+	spin_lock_irqsave(&owner->lock, flags);
+	dev = virtio_owner_getdraining_unlocked(owner, idx);
+	if (dev)
+		list_del_init(&dev->devlist);
+	spin_unlock_irqrestore(&owner->lock, flags);
 
 	/*
-	 * Release outside the spinlock: virtio_lo_device_release() calls
+	 * Finalize outside the spinlock: platform_device_unregister() calls
 	 * platform_device_unregister() (-> virtio_gpu_remove -> drm_dev_unplug
 	 * -> synchronize_srcu()), which can sleep and must not run in atomic
-	 * context. The release path below does the same for this reason.
+	 * context. KICK cannot find dev after list_del_init(), so no interrupt
+	 * can race with virtqueue destruction.
 	 */
 	if (dev) {
-		/*
-		 * Keep the device reachable to VIRTIO_LO_KICK while unregister
-		 * waits for virtio-gpu clients to leave their ioctls.
-		 */
 		platform_device_unregister(dev->pdev);
-		spin_lock_irqsave(&owner->lock, flags);
-		list_del_init(&dev->devlist);
-		spin_unlock_irqrestore(&owner->lock, flags);
 		virtio_lo_device_destroy(dev);
 		ret = 0;
 	}
+	mutex_unlock(&owner->lifecycle_lock);
+
 	return ret;
+}
+
+static long vilo_ioctl_deldev(struct virtio_lo_owner *owner, unsigned idx)
+{
+	long ret = vilo_ioctl_begin_deldev_drain(owner, idx);
+
+	if (ret)
+		return ret;
+	return vilo_ioctl_finish_deldev_drain(owner, idx);
 }
 
 static long vilo_ioctl_getconf(struct virtio_lo_owner *owner,
@@ -341,16 +374,20 @@ static long vilo_ioctl_getconf(struct virtio_lo_owner *owner,
 	long ret = 0;
 	if (copy_from_user(&c, conf, sizeof(c)))
 		return -EFAULT;
+	mutex_lock(&owner->lifecycle_lock);
 	dev = virtio_owner_getdev(owner, c.idx);
 	if (!dev) {
+		mutex_unlock(&owner->lifecycle_lock);
 		return -ENOENT;
 	}
 	if (c.offset >= dev->config_size ||
 	    c.offset + c.len > dev->config_size) {
+		mutex_unlock(&owner->lifecycle_lock);
 		return -EINVAL;
 	}
 	mem = kmalloc(c.len, GFP_KERNEL);
 	if (!mem) {
+		mutex_unlock(&owner->lifecycle_lock);
 		return -ENOMEM;
 	}
 	virtio_lo_config_get(dev, c.offset, mem, c.len);
@@ -358,6 +395,7 @@ static long vilo_ioctl_getconf(struct virtio_lo_owner *owner,
 		ret = -EFAULT;
 	}
 	kfree(mem);
+	mutex_unlock(&owner->lifecycle_lock);
 
 	return ret;
 }
@@ -371,17 +409,21 @@ static long vilo_ioctl_setconf(struct virtio_lo_owner *owner,
 	long ret;
 	if (copy_from_user(&c, conf, sizeof(c)))
 		return -EFAULT;
+	mutex_lock(&owner->lifecycle_lock);
 	dev = virtio_owner_getdev(owner, c.idx);
 	if (!dev) {
+		mutex_unlock(&owner->lifecycle_lock);
 		return -ENOENT;
 	}
 	if (c.offset >= dev->config_size ||
 	    c.offset + c.len > dev->config_size) {
+		mutex_unlock(&owner->lifecycle_lock);
 		return -EINVAL;
 	}
 
 	mem = kmalloc(c.len, GFP_KERNEL);
 	if (!mem) {
+		mutex_unlock(&owner->lifecycle_lock);
 		return -ENOMEM;
 	}
 	if (copy_from_user(mem, c.config, c.len)) {
@@ -392,6 +434,7 @@ static long vilo_ioctl_setconf(struct virtio_lo_owner *owner,
 		ret = 0;
 	}
 	kfree(mem);
+	mutex_unlock(&owner->lifecycle_lock);
 	return ret;
 }
 
@@ -406,6 +449,8 @@ static long vilo_ioctl_kick(struct virtio_lo_owner *owner,
 
 	spin_lock_irqsave(&owner->lock, flags);
 	dev = virtio_owner_getdev_unlocked(owner, k.idx);
+	if (!dev)
+		dev = virtio_owner_getdraining_unlocked(owner, k.idx);
 	if (!dev) {
 		spin_unlock_irqrestore(&owner->lock, flags);
 		return -ENOENT;
@@ -415,10 +460,9 @@ static long vilo_ioctl_kick(struct virtio_lo_owner *owner,
 		return -EINVAL;
 	}
 	/*
-	 * DELDEV keeps draining devices on owner->draining_devlist until
-	 * platform_device_unregister() returns. Do not take the device lock here:
-	 * platform removal holds it while waiting for virtio-gpu clients, and this
-	 * interrupt is what wakes those clients.
+	 * BEGIN_DELDEV_DRAIN keeps the device on draining_devlist. FINISH removes
+	 * it under owner->lock before unregistering, so this interrupt cannot race
+	 * with virtqueue destruction.
 	 */
 	virtio_lo_kick_driver(dev->pdev, k.qidx);
 	spin_unlock_irqrestore(&owner->lock, flags);
@@ -527,8 +571,13 @@ static long virtio_lo_misc_device_ioctl(struct file *file, unsigned int cmd,
 		ret = vilo_ioctl_adddev(owner, argp);
 		break;
 	case VIRTIO_LO_DELDEV:
-	case VIRTIO_LO_DELDEV_DRAIN:
 		ret = vilo_ioctl_deldev(owner, arg);
+		break;
+	case VIRTIO_LO_BEGIN_DELDEV_DRAIN:
+		ret = vilo_ioctl_begin_deldev_drain(owner, arg);
+		break;
+	case VIRTIO_LO_FINISH_DELDEV_DRAIN:
+		ret = vilo_ioctl_finish_deldev_drain(owner, arg);
 		break;
 	case VIRTIO_LO_GCONF:
 		ret = vilo_ioctl_getconf(owner, argp);
