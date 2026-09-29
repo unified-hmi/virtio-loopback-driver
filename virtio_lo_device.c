@@ -401,8 +401,6 @@ static long vilo_ioctl_kick(struct virtio_lo_owner *owner,
 	unsigned long flags;
 	struct virtio_lo_kick k;
 	struct virtio_lo_device *dev;
-	struct platform_device *pdev;
-	long ret = 0;
 	if (copy_from_user(&k, kick, sizeof(k)))
 		return -EFAULT;
 
@@ -416,21 +414,16 @@ static long vilo_ioctl_kick(struct virtio_lo_owner *owner,
 		spin_unlock_irqrestore(&owner->lock, flags);
 		return -EINVAL;
 	}
-	pdev = get_device(&dev->pdev->dev) ? dev->pdev : NULL;
+	/*
+	 * DELDEV keeps draining devices on owner->draining_devlist until
+	 * platform_device_unregister() returns. Do not take the device lock here:
+	 * platform removal holds it while waiting for virtio-gpu clients, and this
+	 * interrupt is what wakes those clients.
+	 */
+	virtio_lo_kick_driver(dev->pdev, k.qidx);
 	spin_unlock_irqrestore(&owner->lock, flags);
 
-	if (!pdev)
-		return -ENODEV;
-
-	device_lock(&pdev->dev);
-	if (platform_get_drvdata(pdev))
-		virtio_lo_kick_driver(pdev, k.qidx);
-	else
-		ret = -ENODEV;
-	device_unlock(&pdev->dev);
-	put_device(&pdev->dev);
-
-	return ret;
+	return 0;
 }
 
 void virtio_lo_kick_device(struct virtio_lo_device *dev, int qidx)
