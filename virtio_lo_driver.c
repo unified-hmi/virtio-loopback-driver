@@ -335,6 +335,7 @@ static void virtio_lo_remove(struct platform_device *pdev)
 	struct virtio_lo_driver *vl_driv = platform_get_drvdata(pdev);
 
 	unregister_virtio_device(&vl_driv->vdev);
+	platform_set_drvdata(pdev, NULL);
 }
 #else
 static int virtio_lo_remove(struct platform_device *pdev)
@@ -342,6 +343,7 @@ static int virtio_lo_remove(struct platform_device *pdev)
 	struct virtio_lo_driver *vl_driv = platform_get_drvdata(pdev);
 
 	unregister_virtio_device(&vl_driv->vdev);
+	platform_set_drvdata(pdev, NULL);
 	return 0;
 }
 #endif

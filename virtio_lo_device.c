@@ -297,13 +297,18 @@ static long vilo_ioctl_deldev(struct virtio_lo_owner *owner, unsigned idx)
 {
 	unsigned long flags;
 	long ret = -ENOENT;
-	struct virtio_lo_device *dev;
+	struct virtio_lo_device *dev = NULL;
+	struct virtio_lo_device *candidate;
 
 	spin_lock_irqsave(&owner->lock, flags);
-
-	dev = virtio_owner_getdev_unlocked(owner, idx);
-	if (dev)
-		list_move_tail(&dev->devlist, &owner->draining_devlist);
+	list_for_each_entry (candidate, &owner->devlist, devlist) {
+		if (candidate->idx == idx) {
+			dev = candidate;
+			list_move_tail(&candidate->devlist,
+				       &owner->draining_devlist);
+			break;
+		}
+	}
 	spin_unlock_irqrestore(&owner->lock, flags);
 
 	/*
@@ -396,6 +401,8 @@ static long vilo_ioctl_kick(struct virtio_lo_owner *owner,
 	unsigned long flags;
 	struct virtio_lo_kick k;
 	struct virtio_lo_device *dev;
+	struct platform_device *pdev;
+	long ret = 0;
 	if (copy_from_user(&k, kick, sizeof(k)))
 		return -EFAULT;
 
@@ -409,10 +416,21 @@ static long vilo_ioctl_kick(struct virtio_lo_owner *owner,
 		spin_unlock_irqrestore(&owner->lock, flags);
 		return -EINVAL;
 	}
-	virtio_lo_kick_driver(dev->pdev, k.qidx);
+	pdev = get_device(&dev->pdev->dev) ? dev->pdev : NULL;
 	spin_unlock_irqrestore(&owner->lock, flags);
 
-	return 0;
+	if (!pdev)
+		return -ENODEV;
+
+	device_lock(&pdev->dev);
+	if (platform_get_drvdata(pdev))
+		virtio_lo_kick_driver(pdev, k.qidx);
+	else
+		ret = -ENODEV;
+	device_unlock(&pdev->dev);
+	put_device(&pdev->dev);
+
+	return ret;
 }
 
 void virtio_lo_kick_device(struct virtio_lo_device *dev, int qidx)
