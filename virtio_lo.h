@@ -49,7 +49,7 @@ struct virtio_lo_kick {
 /* ioctl for creating virtio device */
 #define VIRTIO_LO_ADDDEV _IOWR(VIRTIO_LOIO, 1, struct virtio_lo_devinfo)
 #define VIRTIO_LO_DELDEV _IOW(VIRTIO_LOIO, 2, unsigned)
-/* Begin/finish a DELDEV while keeping VIRTIO_LO_KICK available to drain. */
+/* BEGIN keeps KICK available; FINISH rejects later KICKs and destroys queues. */
 #define VIRTIO_LO_BEGIN_DELDEV_DRAIN _IOW(VIRTIO_LOIO, 3, unsigned)
 #define VIRTIO_LO_FINISH_DELDEV_DRAIN _IOW(VIRTIO_LOIO, 4, unsigned)
 

@@ -133,18 +133,27 @@ static int virtio_lo_misc_device_release(struct inode *inode, struct file *file)
 	if (file->private_data) {
 		struct virtio_lo_owner *owner = file->private_data;
 		unsigned long flags;
+		struct virtio_lo_device *dev;
+
+		mutex_lock(&owner->lifecycle_lock);
 		spin_lock_irqsave(&owner->lock, flags);
-		while (!list_empty(&owner->devlist)) {
-			struct virtio_lo_device *dev =
-				list_first_entry(&owner->devlist,
-						 struct virtio_lo_device,
-						 devlist);
-			list_del(&dev->devlist);
+		while (!list_empty(&owner->devlist) ||
+		       !list_empty(&owner->draining_devlist)) {
+			if (!list_empty(&owner->devlist))
+				dev = list_first_entry(&owner->devlist,
+						       struct virtio_lo_device,
+						       devlist);
+			else
+				dev = list_first_entry(&owner->draining_devlist,
+						       struct virtio_lo_device,
+						       devlist);
+			list_del_init(&dev->devlist);
 			spin_unlock_irqrestore(&owner->lock, flags);
 			virtio_lo_device_release(dev);
 			spin_lock_irqsave(&owner->lock, flags);
 		}
 		spin_unlock_irqrestore(&owner->lock, flags);
+		mutex_unlock(&owner->lifecycle_lock);
 		kfree(owner);
 	}
 	dev_notice(&vl_device_parent, "misc device released\n");
@@ -343,8 +352,9 @@ static long vilo_ioctl_finish_deldev_drain(struct virtio_lo_owner *owner,
 	 * Finalize outside the spinlock: platform_device_unregister() calls
 	 * platform_device_unregister() (-> virtio_gpu_remove -> drm_dev_unplug
 	 * -> synchronize_srcu()), which can sleep and must not run in atomic
-	 * context. KICK cannot find dev after list_del_init(), so no interrupt
-	 * can race with virtqueue destruction.
+	 * context. FINISH is the protocol boundary after userspace has delivered
+	 * all final KICKs; it removes dev before unregistering so later KICKs
+	 * cannot race with virtqueue destruction.
 	 */
 	if (dev) {
 		platform_device_unregister(dev->pdev);
