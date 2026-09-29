@@ -527,6 +527,7 @@ static long virtio_lo_misc_device_ioctl(struct file *file, unsigned int cmd,
 		ret = vilo_ioctl_adddev(owner, argp);
 		break;
 	case VIRTIO_LO_DELDEV:
+	case VIRTIO_LO_DELDEV_DRAIN:
 		ret = vilo_ioctl_deldev(owner, arg);
 		break;
 	case VIRTIO_LO_GCONF:
