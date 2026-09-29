@@ -42,6 +42,7 @@ struct virtio_lo_owner {
 	atomic_t lastidx;
 	spinlock_t lock;
 	struct list_head devlist;
+	struct list_head draining_devlist;
 };
 
 /* should be called with owner->lock held */
@@ -50,6 +51,15 @@ virtio_owner_getdev_unlocked(struct virtio_lo_owner *owner, unsigned idx)
 {
 	struct virtio_lo_device *ret = NULL, *dev;
 	list_for_each_entry (dev, &owner->devlist, devlist) {
+		if (dev->idx == idx) {
+			ret = dev;
+			break;
+		}
+	}
+	if (ret)
+		return ret;
+
+	list_for_each_entry (dev, &owner->draining_devlist, devlist) {
 		if (dev->idx == idx) {
 			ret = dev;
 			break;
@@ -76,18 +86,17 @@ static int virtio_lo_misc_device_open(struct inode *inode, struct file *file)
 	owner = kmalloc(sizeof(*owner), GFP_KERNEL);
 	spin_lock_init(&owner->lock);
 	INIT_LIST_HEAD(&owner->devlist);
+	INIT_LIST_HEAD(&owner->draining_devlist);
 	file->private_data = owner;
 	return 0;
 }
 
-static void virtio_lo_device_release(struct virtio_lo_device *dev)
+static void virtio_lo_device_destroy(struct virtio_lo_device *dev)
 {
 	unsigned long i;
 
 	dev->status = 0;
 	dev->device_features = 0;
-
-	platform_device_unregister(dev->pdev);
 
 	kfree(dev->config);
 	dev->config = NULL;
@@ -104,6 +113,12 @@ static void virtio_lo_device_release(struct virtio_lo_device *dev)
 	kfree(dev->queues);
 	kfree(dev);
 	dev_notice(&vl_device_parent, "device released\n");
+}
+
+static void virtio_lo_device_release(struct virtio_lo_device *dev)
+{
+	platform_device_unregister(dev->pdev);
+	virtio_lo_device_destroy(dev);
 }
 
 static int virtio_lo_misc_device_release(struct inode *inode, struct file *file)
@@ -288,7 +303,7 @@ static long vilo_ioctl_deldev(struct virtio_lo_owner *owner, unsigned idx)
 
 	dev = virtio_owner_getdev_unlocked(owner, idx);
 	if (dev)
-		list_del(&dev->devlist);
+		list_move_tail(&dev->devlist, &owner->draining_devlist);
 	spin_unlock_irqrestore(&owner->lock, flags);
 
 	/*
@@ -298,7 +313,15 @@ static long vilo_ioctl_deldev(struct virtio_lo_owner *owner, unsigned idx)
 	 * context. The release path below does the same for this reason.
 	 */
 	if (dev) {
-		virtio_lo_device_release(dev);
+		/*
+		 * Keep the device reachable to VIRTIO_LO_KICK while unregister
+		 * waits for virtio-gpu clients to leave their ioctls.
+		 */
+		platform_device_unregister(dev->pdev);
+		spin_lock_irqsave(&owner->lock, flags);
+		list_del_init(&dev->devlist);
+		spin_unlock_irqrestore(&owner->lock, flags);
+		virtio_lo_device_destroy(dev);
 		ret = 0;
 	}
 	return ret;
@@ -370,18 +393,24 @@ static long vilo_ioctl_setconf(struct virtio_lo_owner *owner,
 static long vilo_ioctl_kick(struct virtio_lo_owner *owner,
 			    const struct virtio_lo_kick __user *kick)
 {
+	unsigned long flags;
 	struct virtio_lo_kick k;
 	struct virtio_lo_device *dev;
 	if (copy_from_user(&k, kick, sizeof(k)))
 		return -EFAULT;
-	dev = virtio_owner_getdev(owner, k.idx);
+
+	spin_lock_irqsave(&owner->lock, flags);
+	dev = virtio_owner_getdev_unlocked(owner, k.idx);
 	if (!dev) {
+		spin_unlock_irqrestore(&owner->lock, flags);
 		return -ENOENT;
 	}
 	if (k.qidx >= dev->nqueues) {
+		spin_unlock_irqrestore(&owner->lock, flags);
 		return -EINVAL;
 	}
 	virtio_lo_kick_driver(dev->pdev, k.qidx);
+	spin_unlock_irqrestore(&owner->lock, flags);
 
 	return 0;
 }
