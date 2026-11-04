@@ -1,10 +1,91 @@
 name: test
 run-name: Build virtio-lo kernel driver
-on: [push]
+on:
+  push:
+  pull_request:
 
 jobs:
 
+  kernel-build:
+    name: Build kernel module on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kernel headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential linux-headers-generic
+
+      - name: Build against installed kernel headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          headers_found=false
+
+          for build_dir in /lib/modules/*/build; do
+            if [[ ! -f "${build_dir}/Makefile" ]]; then
+              continue
+            fi
+
+            headers_found=true
+            kernel_release="$(basename "$(dirname "${build_dir}")")"
+            echo "Building virtio-lo against Linux ${kernel_release}"
+            make -C "${build_dir}" M="${GITHUB_WORKSPACE}" clean
+            make -C "${build_dir}" M="${GITHUB_WORKSPACE}" modules
+          done
+
+          if [[ "${headers_found}" != true ]]; then
+            echo "::error::No kernel headers were found"
+            exit 1
+          fi
+
+  kernel-5-10:
+    name: Build against upstream Linux 5.10 headers
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kernel build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential flex gcc-11 libelf-dev libssl-dev
+
+      - name: Download Linux 5.10 source
+        run: |
+          curl -fsSL https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-5.10.tar.xz \
+            -o "${RUNNER_TEMP}/linux-5.10.tar.xz"
+          tar -xf "${RUNNER_TEMP}/linux-5.10.tar.xz" -C "${RUNNER_TEMP}"
+
+      - name: Prepare Linux 5.10 headers
+        run: |
+          make -C "${RUNNER_TEMP}/linux-5.10" CC=gcc-11 HOSTCC=gcc-11 defconfig
+          make -C "${RUNNER_TEMP}/linux-5.10" CC=gcc-11 HOSTCC=gcc-11 \
+            -j"$(nproc)" modules_prepare
+
+      - name: Build virtio-lo against Linux 5.10
+        run: |
+          make -C "${RUNNER_TEMP}/linux-5.10" \
+            CC=gcc-11 HOSTCC=gcc-11 M="${GITHUB_WORKSPACE}" \
+            -j"$(nproc)" modules
+
   build:
+    if: github.event_name == 'push'
+    needs: [kernel-build, kernel-5-10]
     name: Build on ubuntu-22.04
     runs-on: ubuntu-22.04
     permissions:
@@ -12,7 +93,7 @@ jobs:
     steps:
 
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Compose environment variables
         run: |
