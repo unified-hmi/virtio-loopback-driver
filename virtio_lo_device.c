@@ -7,11 +7,14 @@
 #include <linux/atomic.h>
 #include <linux/eventfd.h>
 #include <linux/fs.h>
+#include <linux/kernel.h>
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/rwsem.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
 #include <linux/dma-mapping.h>
@@ -34,6 +37,21 @@
 #define virtio_lo_eventfd_signal(ctx) eventfd_signal(ctx, 1)
 #endif
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
+static inline void vm_flags_set(struct vm_area_struct *vma, vm_flags_t flags)
+{
+	vma->vm_flags |= flags;
+}
+#endif
+
+#define VIRTIO_LO_DEAD_PAGES_MAX 1024
+
+struct virtio_lo_dead_range {
+	struct list_head list;
+	unsigned long start_pfn;
+	unsigned long end_pfn;
+};
+
 static void virtio_lo_add_pdev(struct work_struct *work);
 
 static void vl_device_parent_release(struct device *dev)
@@ -54,6 +72,14 @@ struct virtio_lo_owner {
 	atomic_t lastidx;
 	spinlock_t lock;
 	struct list_head devlist;
+	struct address_space *mapping;
+	struct rw_semaphore revoke_lock;
+	struct list_head dead_ranges;
+	spinlock_t dead_pages_lock;
+	struct list_head dead_pages;
+	unsigned int nr_dead_pages;
+	unsigned int live_devs;
+	bool mappings_disabled;
 };
 
 /* should be called with owner->lock held */
@@ -81,13 +107,182 @@ virtio_owner_getdev(struct virtio_lo_owner *owner, unsigned idx)
 	return ret;
 }
 
+static bool virtio_lo_owner_pfn_live(struct virtio_lo_owner *owner,
+				     unsigned long pfn)
+{
+	struct virtio_lo_dead_range *range;
+
+	if (owner->mappings_disabled || owner->live_devs == 0)
+		return false;
+
+	list_for_each_entry(range, &owner->dead_ranges, list) {
+		if (pfn >= range->start_pfn && pfn < range->end_pfn)
+			return false;
+	}
+	return true;
+}
+
+static vm_fault_t virtio_lo_dead_fault(struct vm_fault *vmf)
+{
+	struct virtio_lo_owner *owner = vmf->vma->vm_file->private_data;
+	struct page *page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+
+	if (!page)
+		return VM_FAULT_OOM;
+
+	spin_lock(&owner->dead_pages_lock);
+	if (owner->nr_dead_pages >= VIRTIO_LO_DEAD_PAGES_MAX) {
+		spin_unlock(&owner->dead_pages_lock);
+		__free_page(page);
+		return VM_FAULT_SIGBUS;
+	}
+	owner->nr_dead_pages++;
+	list_add(&page->lru, &owner->dead_pages);
+	spin_unlock(&owner->dead_pages_lock);
+
+	return vmf_insert_pfn(vmf->vma, vmf->address, page_to_pfn(page));
+}
+
+static vm_fault_t virtio_lo_misc_legacy_fault(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	struct virtio_lo_owner *owner = vma->vm_file->private_data;
+	unsigned long addr;
+	vm_fault_t ret;
+
+	down_read(&owner->revoke_lock);
+	if (!virtio_lo_owner_pfn_live(owner, vmf->pgoff)) {
+		up_read(&owner->revoke_lock);
+		return virtio_lo_dead_fault(vmf);
+	}
+	ret = vmf_insert_pfn(vma, vmf->address, vmf->pgoff);
+
+	for (addr = vma->vm_start; addr < vma->vm_end; addr += PAGE_SIZE) {
+		unsigned long pfn = vma->vm_pgoff +
+				    ((addr - vma->vm_start) >> PAGE_SHIFT);
+
+		if (addr != vmf->address &&
+		    virtio_lo_owner_pfn_live(owner, pfn))
+			vmf_insert_pfn(vma, addr, pfn);
+	}
+	up_read(&owner->revoke_lock);
+	return ret;
+}
+
+static const struct vm_operations_struct virtio_lo_misc_legacy_vm_ops = {
+	.fault = virtio_lo_misc_legacy_fault,
+};
+
+static int virtio_lo_revoke_range(struct virtio_lo_owner *owner,
+				  u64 start, u64 end)
+{
+	struct virtio_lo_dead_range *range;
+
+	if (start >= end)
+		return 0;
+
+	range = kmalloc(sizeof(*range), GFP_KERNEL);
+	if (!range) {
+		dev_err(&vl_device_parent,
+			"cannot record revoked PFN range 0x%llx-0x%llx\n",
+			start, end);
+		return -ENOMEM;
+	}
+	range->start_pfn = PFN_DOWN(start);
+	range->end_pfn = PFN_UP(end);
+	list_add(&range->list, &owner->dead_ranges);
+	return 1;
+}
+
+void virtio_lo_device_revoke(struct virtio_lo_device *dev)
+{
+	struct virtio_lo_owner *owner = dev->owner;
+	struct virtio_lo_dead_range *range;
+	int added = 0;
+	bool allocation_failed = false;
+	unsigned int i;
+
+	if (!owner)
+		return;
+
+	down_write(&owner->revoke_lock);
+	if (dev->revoked) {
+		up_write(&owner->revoke_lock);
+		return;
+	}
+	dev->revoked = true;
+	if (dev->live) {
+		dev->live = false;
+		owner->live_devs--;
+	}
+
+	if (owner->mappings_disabled) {
+		up_write(&owner->revoke_lock);
+		return;
+	}
+
+	for (i = 0; dev->queues && i < dev->nqueues; i++) {
+		struct virtio_lo_vq_info *q = &dev->queues[i];
+		u64 start, end;
+		int ret;
+
+		if (!q->size)
+			continue;
+		start = min3(q->desc, q->avail, q->used);
+		end = max3(q->desc + 16ull * q->size,
+			   q->avail + 2ull * q->size + 6,
+			   q->used + 8ull * q->size + 6);
+		ret = virtio_lo_revoke_range(owner, start, end);
+		if (ret < 0) {
+			allocation_failed = true;
+			break;
+		}
+		added += ret;
+	}
+
+	if (allocation_failed) {
+		owner->mappings_disabled = true;
+		downgrade_write(&owner->revoke_lock);
+		unmap_mapping_range(owner->mapping, 0, 0, 1);
+		up_read(&owner->revoke_lock);
+		return;
+	}
+
+	if (added > 0) {
+		int remaining = added;
+
+		downgrade_write(&owner->revoke_lock);
+		list_for_each_entry(range, &owner->dead_ranges, list) {
+			if (remaining-- == 0)
+				break;
+			unmap_mapping_range(
+				owner->mapping,
+				(loff_t)range->start_pfn << PAGE_SHIFT,
+				(loff_t)(range->end_pfn - range->start_pfn)
+					<< PAGE_SHIFT,
+				1);
+		}
+		up_read(&owner->revoke_lock);
+	} else {
+		up_write(&owner->revoke_lock);
+	}
+}
+
 static int virtio_lo_misc_device_open(struct inode *inode, struct file *file)
 {
 	struct virtio_lo_owner *owner;
 
-	owner = kmalloc(sizeof(*owner), GFP_KERNEL);
+	owner = kzalloc(sizeof(*owner), GFP_KERNEL);
+	if (!owner)
+		return -ENOMEM;
+	atomic_set(&owner->lastidx, 0);
 	spin_lock_init(&owner->lock);
 	INIT_LIST_HEAD(&owner->devlist);
+	owner->mapping = file->f_mapping;
+	init_rwsem(&owner->revoke_lock);
+	INIT_LIST_HEAD(&owner->dead_ranges);
+	spin_lock_init(&owner->dead_pages_lock);
+	INIT_LIST_HEAD(&owner->dead_pages);
 	file->private_data = owner;
 	return 0;
 }
@@ -100,6 +295,7 @@ static void virtio_lo_device_release(struct virtio_lo_device *dev)
 	dev->device_features = 0;
 
 	platform_device_unregister(dev->pdev);
+	virtio_lo_device_revoke(dev);
 
 	kfree(dev->config);
 	dev->config = NULL;
@@ -135,6 +331,22 @@ static int virtio_lo_misc_device_release(struct inode *inode, struct file *file)
 			spin_lock_irqsave(&owner->lock, flags);
 		}
 		spin_unlock_irqrestore(&owner->lock, flags);
+		while (!list_empty(&owner->dead_ranges)) {
+			struct virtio_lo_dead_range *range =
+				list_first_entry(&owner->dead_ranges,
+						 struct virtio_lo_dead_range,
+						 list);
+
+			list_del(&range->list);
+			kfree(range);
+		}
+		while (!list_empty(&owner->dead_pages)) {
+			struct page *page = list_first_entry(
+				&owner->dead_pages, struct page, lru);
+
+			list_del(&page->lru);
+			__free_page(page);
+		}
 		kfree(owner);
 	}
 	dev_notice(&vl_device_parent, "misc device released\n");
@@ -144,11 +356,20 @@ static int virtio_lo_misc_device_release(struct inode *inode, struct file *file)
 static int virtio_lo_misc_device_mmap(struct file *file,
 				      struct vm_area_struct *vma)
 {
-	/* Remap-pfn-range will mark the range VM_IO */
-	if (remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff,
-			    vma->vm_end - vma->vm_start, vma->vm_page_prot)) {
-		return -EAGAIN;
-	}
+	struct virtio_lo_owner *owner = file->private_data;
+	bool live;
+
+	if ((vma->vm_flags & (VM_SHARED | VM_MAYWRITE)) == VM_MAYWRITE)
+		return -EINVAL;
+
+	down_read(&owner->revoke_lock);
+	live = owner->live_devs > 0 && !owner->mappings_disabled;
+	up_read(&owner->revoke_lock);
+	if (!live)
+		return -ENODEV;
+
+	vm_flags_set(vma, VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
+	vma->vm_ops = &virtio_lo_misc_legacy_vm_ops;
 	return 0;
 }
 
@@ -179,9 +400,19 @@ static long vilo_ioctl_adddev(struct virtio_lo_owner *owner,
 	struct virtio_lo_devinfo di;
 	struct virtio_lo_device *dev;
 	struct virtio_lo_qinfo *qi;
+	bool mappings_disabled;
 	unsigned i;
 	long ret = 0;
 	unsigned long flags;
+
+	down_read(&owner->revoke_lock);
+	mappings_disabled = owner->mappings_disabled;
+	up_read(&owner->revoke_lock);
+	if (mappings_disabled) {
+		dev_err(&vl_device_parent,
+			"cannot add device after PFN mappings were disabled\n");
+		return -EIO;
+	}
 
 	if (copy_from_user(&di, info, sizeof(di))) {
 		return -EFAULT;
@@ -191,6 +422,7 @@ static long vilo_ioctl_adddev(struct virtio_lo_owner *owner,
 	if (!dev) {
 		return -ENOMEM;
 	}
+	dev->owner = owner;
 
 	spin_lock_init(&dev->config_lock);
 	spin_lock_init(&dev->status_lock);
@@ -276,6 +508,11 @@ static long vilo_ioctl_adddev(struct virtio_lo_owner *owner,
 	spin_lock_irqsave(&owner->lock, flags);
 	list_add(&dev->devlist, &owner->devlist);
 	spin_unlock_irqrestore(&owner->lock, flags);
+
+	down_write(&owner->revoke_lock);
+	dev->live = true;
+	owner->live_devs++;
+	up_write(&owner->revoke_lock);
 
 	kfree(qi);
 	return ret;

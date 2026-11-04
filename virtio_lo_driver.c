@@ -177,6 +177,7 @@ static void vl_del_vqs(struct virtio_device *vdev)
 	unsigned i;
 
 	dev_notice(&vdev->dev, "deleting queues");
+	virtio_lo_device_revoke(vl_dev);
 
 	for (i = 0; i < vl_dev->nqueues; i++) {
 		struct virtqueue *vq = vl_driver->queues[i];
