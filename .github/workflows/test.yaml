@@ -6,8 +6,10 @@ on:
 
 jobs:
 
-  kernel-build:
-    name: Build kernel module on ${{ matrix.os }}
+  ubuntu-kernel-build:
+    # Builds against every installed header set: the runner's own kernel and
+    # the distro generic kernel (5.15 on 22.04, 6.8 on 24.04).
+    name: Build against ${{ matrix.os }} kernel headers
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -43,6 +45,7 @@ jobs:
             echo "Building virtio-lo against Linux ${kernel_release}"
             make -C "${build_dir}" M="${GITHUB_WORKSPACE}" clean
             make -C "${build_dir}" M="${GITHUB_WORKSPACE}" modules
+            echo "- Linux ${kernel_release}: built" >> "${GITHUB_STEP_SUMMARY}"
           done
 
           if [[ "${headers_found}" != true ]]; then
@@ -50,11 +53,23 @@ jobs:
             exit 1
           fi
 
-  kernel-5-10:
-    name: Build against upstream Linux 5.10 headers
+  upstream-kernel-build:
+    # LTS kernels used by Yocto releases (dunfell 5.4, kirkstone 5.10/5.15,
+    # mickledore 6.1, scarthgap 6.6). 5.15 is covered by ubuntu-22.04.
+    name: Build against upstream Linux ${{ matrix.kernel }}
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel:
+          - 5.4.302
+          - 5.10.273
+          - 6.1.191
+          - 6.6.161
     permissions:
       contents: read
+    env:
+      KERNEL_VERSION: ${{ matrix.kernel }}
     steps:
 
       - name: Checkout
@@ -65,27 +80,31 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential flex gcc-11 libelf-dev libssl-dev
 
-      - name: Download Linux 5.10 source
+      - name: Download Linux ${{ matrix.kernel }} source
         run: |
-          curl -fsSL https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-5.10.tar.xz \
-            -o "${RUNNER_TEMP}/linux-5.10.tar.xz"
-          tar -xf "${RUNNER_TEMP}/linux-5.10.tar.xz" -C "${RUNNER_TEMP}"
+          curl -fsSL "https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_VERSION%%.*}.x/linux-${KERNEL_VERSION}.tar.xz" \
+            -o "${RUNNER_TEMP}/linux.tar.xz"
+          tar -xf "${RUNNER_TEMP}/linux.tar.xz" -C "${RUNNER_TEMP}"
 
-      - name: Prepare Linux 5.10 headers
+      - name: Prepare Linux ${{ matrix.kernel }} headers
         run: |
-          make -C "${RUNNER_TEMP}/linux-5.10" CC=gcc-11 HOSTCC=gcc-11 defconfig
-          make -C "${RUNNER_TEMP}/linux-5.10" CC=gcc-11 HOSTCC=gcc-11 \
+          make -C "${RUNNER_TEMP}/linux-${KERNEL_VERSION}" CC=gcc-11 HOSTCC=gcc-11 defconfig
+          make -C "${RUNNER_TEMP}/linux-${KERNEL_VERSION}" CC=gcc-11 HOSTCC=gcc-11 \
             -j"$(nproc)" modules_prepare
 
-      - name: Build virtio-lo against Linux 5.10
+      - name: Build virtio-lo against Linux ${{ matrix.kernel }}
+        # modules_prepare does not produce Module.symvers, so kernel symbols
+        # cannot be resolved; keep modpost from treating that as an error.
         run: |
-          make -C "${RUNNER_TEMP}/linux-5.10" \
-            CC=gcc-11 HOSTCC=gcc-11 M="${GITHUB_WORKSPACE}" \
-            -j"$(nproc)" modules
+          make -C "${RUNNER_TEMP}/linux-${KERNEL_VERSION}" \
+            CC=gcc-11 HOSTCC=gcc-11 KBUILD_MODPOST_WARN=1 \
+            M="${GITHUB_WORKSPACE}" -j"$(nproc)" modules
+          echo "- Linux ${KERNEL_VERSION} (upstream defconfig, gcc-11): built" \
+            >> "${GITHUB_STEP_SUMMARY}"
 
   build:
     if: github.event_name == 'push'
-    needs: [kernel-build, kernel-5-10]
+    needs: [ubuntu-kernel-build, upstream-kernel-build]
     name: Build on ubuntu-22.04
     runs-on: ubuntu-22.04
     permissions:
