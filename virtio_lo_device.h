@@ -21,6 +21,8 @@ struct virtio_lo_vq_info {
 	struct eventfd_ctx *device_kick;
 };
 
+struct virtio_lo_owner;
+
 struct virtio_lo_device {
 	unsigned idx;
 	u32 device_id;
@@ -47,9 +49,16 @@ struct virtio_lo_device {
 	unsigned nqueues;
 	struct virtio_lo_vq_info *queues;
 	struct list_head devlist;
+	struct virtio_lo_owner *owner;
+	/* Protected by owner->revoke_lock. */
+	bool live;
+	bool revoked;
 };
 
 /* interaction between driver and device */
+
+/** Revoke userspace PFN mappings before the virtqueues are freed. */
+void virtio_lo_device_revoke(struct virtio_lo_device *dev);
 
 /* Queue management */
 
