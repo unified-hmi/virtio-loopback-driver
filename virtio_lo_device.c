@@ -22,6 +22,18 @@
 #include "virtio_lo_driver.h"
 #include "virtio_lo.h"
 
+/*
+ * eventfd_signal() lost its count argument in 6.8, and the change was
+ * backported to the 6.6 stable series in 6.6.160.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0) ||                    \
+	(LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 160) &&             \
+	 LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0))
+#define virtio_lo_eventfd_signal(ctx) eventfd_signal(ctx)
+#else
+#define virtio_lo_eventfd_signal(ctx) eventfd_signal(ctx, 1)
+#endif
+
 static void virtio_lo_add_pdev(struct work_struct *work);
 
 static void vl_device_parent_release(struct device *dev)
@@ -390,21 +402,13 @@ void virtio_lo_kick_device(struct virtio_lo_device *dev, int qidx)
 {
 	if (qidx >= 0 && qidx < dev->nqueues) {
 		if (dev->queues[qidx].device_kick) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
-			eventfd_signal(dev->queues[qidx].device_kick);
-#else
-			eventfd_signal(dev->queues[qidx].device_kick, 1);
-#endif
+			virtio_lo_eventfd_signal(dev->queues[qidx].device_kick);
 		}
 	} else {
 		unsigned i;
 		for (i = 0; i < dev->nqueues; i++) {
 			if (dev->queues[i].device_kick) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
-				eventfd_signal(dev->queues[i].device_kick);
-#else
-				eventfd_signal(dev->queues[i].device_kick, 1);
-#endif
+				virtio_lo_eventfd_signal(dev->queues[i].device_kick);
 			}
 		}
 	}
@@ -429,11 +433,7 @@ void virtio_lo_set_queue(struct virtio_lo_device *dev, unsigned qidx, u32 size,
 void virtio_lo_config_device(struct virtio_lo_device *dev)
 {
 	if (dev->config_kick) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
-		eventfd_signal(dev->config_kick);
-#else
-		eventfd_signal(dev->config_kick, 1);
-#endif
+		virtio_lo_eventfd_signal(dev->config_kick);
 	}
 }
 
