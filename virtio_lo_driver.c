@@ -327,6 +327,21 @@ static int virtio_lo_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, vl_driv);
 
+#if defined(CONFIG_ARCH_HAS_SYNC_DMA_FOR_DEVICE) || \
+	defined(CONFIG_ARCH_HAS_SYNC_DMA_FOR_CPU) || \
+	defined(CONFIG_ARCH_HAS_SYNC_DMA_FOR_CPU_ALL)
+	/*
+	 * The "device" behind virtio-lo is a userspace process running on the
+	 * same cache-coherent CPUs, which maps vrings and buffers Write-Back.
+	 * This platform device has no firmware node, so on arm64 it would
+	 * default to non-coherent: when virtio uses the DMA API (e.g. under
+	 * Xen) the vrings would be allocated Normal-NC and the proxy's
+	 * used-ring updates would be missed. Declare it DMA-coherent so that
+	 * both sides use cacheable mappings.
+	 */
+	pdev->dev.dma_coherent = true;
+#endif
+
 	return register_virtio_device(&vl_driv->vdev);
 }
 
